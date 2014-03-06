@@ -1,0 +1,176 @@
+#!/bin/bash
+host=localhost     # mpd host address. format as "pass@host" if using a password
+port=6600          # mpd port number
+duration=2500      # Length of time in milliseconds to display notification
+
+# Location for repeat & random notification icons. Set blank to show none
+shuffle_icon=/usr/share/icons/gnome/48x48/status/media-playlist-shuffle.png
+repeat_icon=/usr/share/icons/gnome/48x48/status/media-playlist-repeat.png
+
+# Cover search mode 
+# 0 = Disable cover art completely 
+# 1 = Assume cover art is named "folder.jpg" in current song's directory
+# 2 = Execute the "custom_cover" function defined below
+# 3 = Same as 1 but move the jpeg image to /tmp/np.jpg
+cover_mode=2
+
+# mpd music directory location. Set this if you are using cover_mode=1
+# Needs to be an absolute string if you are using cover_mode=3
+music_dir=/home/swans/music
+
+# Cover art directory location. Set this if you are using cover_mode=2
+cover_dir=~/.config/ario/covers
+
+# custom_cover function. Edit this to fit your needs. Default works with Ario
+custom_cover() {
+    mpc_control current -f %artist%-%album% | \
+                sed 's/\//\ /g' | \
+                # Replaces "/" with a space
+                sed 's/,//g' | \
+                # Removes ","
+                sed 's/#/\ /g'
+                # Replaces "#" with a space
+}
+
+##--------------------##
+## Begin shell script ##
+##--------------------##
+
+# Executes the mpc command. Used to slim the script down a bit
+mpc_control() {
+    mpc -h $host -p $port "$@"
+}
+
+# Finds the song title for notification's header
+get_header() {
+    mpc_control current -f "%title%"
+}
+
+# Finds general song info for notifcation's body
+get_body() {
+    #mpc_control current -f "<i>from</i>\t%album%\n<i>by</i>\t\t%artist%"
+    mpc_control current -f "from\t%album%\nby\t\t%artist%" | \
+                sed 's/\&/and/'   # Work around for bug 8187 in xfce4-notifyd
+    echo -n "time\t"
+    mpc_control | egrep -o "([0-9]??[0-9]:.*|[0-9][0-9]:.*i)"
+    echo -n "#\t\t"
+    mpc_control | egrep -o "[0-9]+\/[0-9]+ "
+}
+
+# Sends the actual notification
+send_notify() {
+case "$cover_mode" in
+    0)
+        true
+    ;;
+    
+    1)
+        cover_art=$(echo -n $music_dir/
+                dirname "$(mpc_control current -f %file%)" | \
+                        sed 's/$/\/folder/'
+        )
+    ;;
+    
+    2)
+        cover_art=$(echo -n $cover_dir/
+                custom_cover
+        )
+    ;;
+
+    3)
+	sha1Current=$(mpc_control current -f %artist%%album% | sha1sum | cut -d' ' -f1)
+	if [ "$(cat /tmp/np.sha1)" == "$sha1Current" ]; then
+		true
+	else
+		raw_cover=$(echo -n $music_dir/
+        		dirname "$(mpc_control current -f %file%)"|\
+                    	sed 's/$/\/folder/'
+			)	
+		# Awful hack because bash tries to use the quotes literally if you 
+		# cancel the second set of double quotes and doesn't parse the variable
+		# if you use single quotes. Fuck my life.
+		echo cp "\"${raw_cover}.jpg\"" /tmp/np.jpg | source /dev/stdin
+		mpc_control current -f %artist%%album% | sha1sum | cut -d' ' -f1 > /tmp/np.sha1
+	fi
+	cover_art=/tmp/np
+	
+    ;;
+    
+    *)
+        echo 'ERROR: Please set variable "cover_mode" to a valid interger!' 
+        exit 1
+    ;;
+esac 
+    notify-send "$(get_header)" "$(get_body)" -i "${cover_art}.jpg"
+    if [ "$?" -gt "0" ]; then
+        echo "ERROR: Couldn't get current song info. Is mpd playing music?"
+        notify-send "ERROR!" "Couldn't get current song info. Is mpd playing music?"
+        exit 1
+    else
+        exit 0
+    fi
+   }
+
+case "$1" in
+    -newart|-N)
+        echo "" > /tmp/np.sha1
+        send_notify
+    ;;
+
+    -random|-R)
+        notify-send "Random" "$(mpc_control random | \
+                  egrep -o 'random: ...??' | \
+                  sed 's/random: //')" -i "$shuffle_icon" -t $duration
+        exit 0
+    ;;
+
+    -repeat|-r)
+        notify-send "Repeat" "$(mpc_control repeat | \
+                  egrep -o 'repeat: ...??' | \
+                  sed 's/repeat: //')" -i "$repeat_icon" -t $duration
+        exit 0
+    ;;
+
+    -toggle|-t)
+        mpc_control toggle > /dev/null
+        send_notify
+    ;;
+
+    -prev|p)
+        mpc_control prev > /dev/null
+        send_notify
+    ;;
+
+    -next|-n)
+        mpc_control next > /dev/null
+        send_notify
+    ;;
+
+    -stop|-s)
+        mpc_control stop > /dev/null 
+        send_notify
+    ;;
+
+# Help dialog
+    help | --help | -h)
+        printf "Usage: $(basename $0) [COMMAND]
+Shell script  which displays current song info in a libnotify notification.
+  help, --help, -h\t- Show this output.
+  notify\t\t- Send a notification command.
+  newart\t\t- Force an album art update and then notify.
+  toggle\t\t- Toggle between 'Play' and 'Pause'.
+  stop\t\t\t- Stop playback.
+  next\t\t\t- Go forward one song.
+  prev\t\t\t- Go backward one song.
+  repeat\t\t- Toggle repeat mode.
+  random\t\t- Toggle randomized playback.\n"
+        exit 0
+    ;;
+
+    *)
+        send_notify
+    ;;
+esac
+
+echo "ERROR: Unknown error."
+exit 1
